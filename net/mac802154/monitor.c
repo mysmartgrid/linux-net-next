@@ -57,7 +57,7 @@ static netdev_tx_t mac802154_monitor_xmit(struct sk_buff *skb,
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += skb->len;
 
-	return mac802154_tx(priv->hw, skb, page, chan);
+	return mac802154_tx(priv, skb, page, chan);
 }
 
 

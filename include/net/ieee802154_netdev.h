@@ -39,6 +39,9 @@ struct ieee802154_mac_cb {
 	struct ieee802154_addr da;
 	u8 flags;
 	u8 seq;
+	u8 sec_level;
+	u8 key_id_mode;
+	u32 frame_counter;
 };
 
 static inline struct ieee802154_mac_cb *mac_cb(struct sk_buff *skb)

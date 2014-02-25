@@ -23,6 +23,8 @@
 #ifndef MAC802154_H
 #define MAC802154_H
 
+#include <linux/crypto.h>
+
 /* mac802154 device private data */
 struct mac802154_priv {
 	struct ieee802154_dev hw;
@@ -84,6 +86,9 @@ struct mac802154_sub_if_data {
 	u8 bsn;
 	/* MAC DSN field */
 	u8 dsn;
+
+	struct crypto_aead *tfm;
+	uint32_t frame_counter;
 };
 
 #define mac802154_to_priv(_hw)	container_of(_hw, struct mac802154_priv, hw)
@@ -102,7 +107,7 @@ void mac802154_monitor_setup(struct net_device *dev);
 void mac802154_wpans_rx(struct mac802154_priv *priv, struct sk_buff *skb);
 void mac802154_wpan_setup(struct net_device *dev);
 
-netdev_tx_t mac802154_tx(struct mac802154_priv *priv, struct sk_buff *skb,
+netdev_tx_t mac802154_tx(struct mac802154_sub_if_data *subif, struct sk_buff *skb,
 			 u8 page, u8 chan);
 
 /* MIB callbacks */
