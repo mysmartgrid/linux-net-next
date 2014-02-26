@@ -20,6 +20,7 @@
 #define NET_MAC802154_H
 
 #include <net/af_ieee802154.h>
+#include <linux/skbuff.h>
 
 /* General MAC frame format:
  *  2 bytes: Frame Control
@@ -28,6 +29,35 @@
  * 14 bytes: Auxiliary Security Header
  */
 #define MAC802154_FRAME_HARD_HEADER_LEN		(2 + 1 + 20 + 14)
+
+struct ieee802154_sechdr {
+	u8 sc;
+	u32 frame_ctr;
+	union {
+		struct {
+			u16 pan_id;
+			u16 short_addr;
+		} pan;
+		u8 hw[IEEE802154_ADDR_LEN];
+	} key_source;
+	u8 key_id;
+};
+
+struct ieee802154_hdr {
+	u16 fc;
+	u8 seq;
+	struct ieee802154_addr source;
+	struct ieee802154_addr dest;
+	struct ieee802154_sechdr sec;
+};
+
+/* pushed hdr onto the skb. fields of hdr->fc that can be calculated from
+ * the contents of hdr will be, and the actual value of those bits in
+ * hdr->fc will be ignored. this includes the INTRA_PAN bit and the frame
+ * version, if SECEN is set.
+ */
+int ieee802154_hdr_push(struct sk_buff *skb, const struct ieee802154_hdr *hdr);
+int ieee802154_hdr_pull(struct sk_buff *skb, struct ieee802154_hdr *hdr);
 
 /* The following flags are used to indicate changed address settings from
  * the stack to the hardware.
