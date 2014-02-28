@@ -149,146 +149,179 @@ ieee802154_hdr_push(struct sk_buff *skb, const struct ieee802154_hdr *hdr)
 	return pos;
 }
 
-static int
-ieee802154_hdr_pull_u8(struct sk_buff *skb, u8 *val)
+static u16 ieee802154_hdr_get_u16(const u8 *buf)
 {
-	if (unlikely(!pskb_may_pull(skb, 1)))
-		return -EINVAL;
+	return buf[0] | (buf[1] << 8);
+}
 
-	*val = skb->data[0];
-	pskb_pull(skb, 1);
-
-	return 0;
+static u32 ieee802154_hdr_get_u32(const u8 *buf)
+{
+	return buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24);
 }
 
 static int
-ieee802154_hdr_pull_u16(struct sk_buff *skb, u16 *val)
+ieee802154_hdr_get_addr(const u8 *buf, int mode, bool omit_pan,
+			struct ieee802154_addr *addr)
 {
-	__le16 field;
+	int pos = 0;
 
-	if (unlikely(!pskb_may_pull(skb, 2)))
-		return -EINVAL;
-
-	memcpy(&field, skb->data, 2);
-	*val = le16_to_cpu(field);
-	pskb_pull(skb, 2);
-
-	return 0;
-}
-
-static int
-ieee802154_hdr_pull_u32(struct sk_buff *skb, u32 *val)
-{
-	__le32 field;
-
-	if (unlikely(!pskb_may_pull(skb, 4)))
-		return -EINVAL;
-
-	memcpy(&field, skb->data, 4);
-	*val = le32_to_cpu(field);
-	pskb_pull(skb, 4);
-
-	return 0;
-}
-
-static int
-ieee802154_hdr_pull_addr(struct sk_buff *skb, int mode, bool omit_pan,
-			 struct ieee802154_addr *addr)
-{
 	addr->addr_type = mode;
 
 	if (mode == IEEE802154_ADDR_NONE)
 		return 0;
 
-	if (!omit_pan && ieee802154_hdr_pull_u16(skb, &addr->pan_id))
-		return -EINVAL;
-
-	switch (mode) {
-	case IEEE802154_ADDR_SHORT:
-		if (ieee802154_hdr_pull_u16(skb, &addr->short_addr))
-			return -EINVAL;
-		break;
-
-	case IEEE802154_ADDR_LONG:
-		if (unlikely(!pskb_may_pull(skb, IEEE802154_ADDR_LEN)))
-			return -EINVAL;
-
-		ieee802154_haddr_copy_swap(addr->hwaddr, skb->data);
-		pskb_pull(skb, IEEE802154_ADDR_LEN);
-		break;
-
-	default:
-		return -EINVAL;
+	if (!omit_pan) {
+		addr->pan_id = ieee802154_hdr_get_u16(buf + pos);
+		pos += 2;
 	}
 
-	return 0;
+	if (mode == IEEE802154_ADDR_SHORT) {
+		addr->short_addr = ieee802154_hdr_get_u16(buf + pos);
+		return pos + 2;
+	} else {
+		ieee802154_haddr_copy_swap(addr->hwaddr, buf + pos);
+		return pos + IEEE802154_ADDR_LEN;
+	}
+}
+
+static int ieee802154_hdr_addr_len(int mode, bool omit_pan)
+{
+	int pan_len = omit_pan ? 0 : 2;
+
+	switch (mode) {
+	case IEEE802154_ADDR_NONE: return 0;
+	case IEEE802154_ADDR_SHORT: return 2 + pan_len;
+	case IEEE802154_ADDR_LONG: return IEEE802154_ADDR_LEN + pan_len;
+	default: return -EINVAL;
+	}
 }
 
 static int
-ieee802154_hdr_pull_sechdr(struct sk_buff *skb, struct ieee802154_sechdr *hdr)
+ieee802154_hdr_get_sechdr(const u8 *buf, struct ieee802154_sechdr *hdr)
 {
-	if (ieee802154_hdr_pull_u8(skb, &hdr->sc))
-		return -EINVAL;
+	int pos = 0;
+	u32 short_index;
 
-	if (ieee802154_hdr_pull_u32(skb, &hdr->frame_ctr))
-		return -EINVAL;
+	hdr->sc = buf[pos++];
+	hdr->frame_ctr = ieee802154_hdr_get_u32(buf + pos);
+	pos += 4;
 
-	if (IEEE802154_SCF_KEY_ID_MODE(hdr->sc)) {
-		u32 short_index;
+	switch (IEEE802154_SCF_KEY_ID_MODE(hdr->sc)) {
+	case IEEE802154_SCF_KEY_IMPLICIT:
+		return pos;
 
-		switch (IEEE802154_SCF_KEY_ID_MODE(hdr->sc)) {
-		case IEEE802154_SCF_KEY_INDEX:
-			break;
+	case IEEE802154_SCF_KEY_INDEX:
+		break;
 
-		case IEEE802154_SCF_KEY_SHORT_INDEX:
-			if (ieee802154_hdr_pull_u32(skb, &short_index))
-				return -EINVAL;
+	case IEEE802154_SCF_KEY_SHORT_INDEX:
+		short_index = ieee802154_hdr_get_u32(buf + pos);
+		pos += 4;
+		hdr->key_source.pan.pan_id = short_index >> 16;
+		hdr->key_source.pan.short_addr = short_index & 0xFFFF;
+		break;
 
-			hdr->key_source.pan.pan_id = short_index >> 16;
-			hdr->key_source.pan.short_addr = short_index & 0xFFFF;
-			break;
-
-		case IEEE802154_SCF_KEY_HW_INDEX:
-			if (unlikely(!pskb_may_pull(skb, IEEE802154_ADDR_LEN)))
-				return -EINVAL;
-
-			ieee802154_haddr_copy_swap(hdr->key_source.hw,
-						   skb->data);
-			pskb_pull(skb, IEEE802154_ADDR_LEN);
-			break;
-		}
-
-		if (ieee802154_hdr_pull_u8(skb, &hdr->key_id))
-			return -EINVAL;
+	case IEEE802154_SCF_KEY_HW_INDEX:
+		ieee802154_haddr_copy_swap(hdr->key_source.hw,
+					   buf + pos);
+		pos += IEEE802154_ADDR_LEN;
+		break;
 	}
 
-	return 0;
+	hdr->key_id = buf[pos++];
+
+	return pos;
+}
+
+static int ieee802154_hdr_sechdr_len(u8 sc)
+{
+	switch (IEEE802154_SCF_KEY_ID_MODE(sc)) {
+	case IEEE802154_SCF_KEY_IMPLICIT: return 5;
+	case IEEE802154_SCF_KEY_INDEX: return 6;
+	case IEEE802154_SCF_KEY_SHORT_INDEX: return 10;
+	case IEEE802154_SCF_KEY_HW_INDEX: return 14;
+	default: return -EINVAL;
+	}
+}
+
+static int ieee802154_hdr_minlen(u16 fc)
+{
+	int dlen, slen;
+
+	dlen = ieee802154_hdr_addr_len(IEEE802154_FC_DAMODE(fc), false);
+	slen = ieee802154_hdr_addr_len(IEEE802154_FC_SAMODE(fc),
+				       fc & IEEE802154_FC_INTRA_PAN);
+
+	if (slen < 0 || dlen < 0)
+		return -EINVAL;
+
+	return 3 + dlen + slen + (fc & IEEE802154_FC_SECEN ? 1 : 0);
+}
+
+static int
+ieee802154_hdr_get_addrs(const u8 *buf, struct ieee802154_hdr *hdr)
+{
+	int pos = 0;
+
+	pos += ieee802154_hdr_get_addr(buf + pos,
+				       IEEE802154_FC_DAMODE(hdr->fc),
+				       false, &hdr->dest);
+	pos += ieee802154_hdr_get_addr(buf + pos,
+				       IEEE802154_FC_SAMODE(hdr->fc),
+				       hdr->fc & IEEE802154_FC_INTRA_PAN,
+				       &hdr->source);
+
+	if (hdr->fc && IEEE802154_FC_INTRA_PAN)
+		hdr->source.pan_id = hdr->dest.pan_id;
+
+	return pos;
 }
 
 int
 ieee802154_hdr_pull(struct sk_buff *skb, struct ieee802154_hdr *hdr)
 {
-	if (ieee802154_hdr_pull_u16(skb, &hdr->fc))
+	int pos = 3, rc;
+
+	if (!pskb_may_pull(skb, 3))
 		return -EINVAL;
 
-	if (ieee802154_hdr_pull_u8(skb, &hdr->seq))
+	hdr->fc = ieee802154_hdr_get_u16(skb->data);
+	hdr->seq = skb->data[2];
+
+	rc = ieee802154_hdr_minlen(hdr->fc);
+	if (rc < 0 || !pskb_may_pull(skb, rc))
 		return -EINVAL;
 
-	if (ieee802154_hdr_pull_addr(skb, IEEE802154_FC_DAMODE(hdr->fc),
-				     false, &hdr->dest))
+	pos += ieee802154_hdr_get_addrs(skb->data + pos, hdr);
+
+	if (hdr->fc & IEEE802154_FC_SECEN) {
+		int want = pos + ieee802154_hdr_sechdr_len(hdr->sec.sc);
+
+		if (!pskb_may_pull(skb, want))
+			return -EINVAL;
+
+		pos += ieee802154_hdr_get_sechdr(skb->data + pos, &hdr->sec);
+	}
+
+	skb_pull(skb, pos);
+	return 0;
+}
+
+int
+ieee802154_hdr_peek_addrs(const struct sk_buff *skb, struct ieee802154_hdr *hdr)
+{
+	const u8 *buf = skb_mac_header(skb);
+	int pos = 3, rc;
+
+	if (buf + 3 > skb->tail)
 		return -EINVAL;
 
-	if (ieee802154_hdr_pull_addr(skb, IEEE802154_FC_SAMODE(hdr->fc),
-				     hdr->fc & IEEE802154_FC_INTRA_PAN,
-				     &hdr->source))
+	hdr->fc = ieee802154_hdr_get_u16(buf);
+	hdr->seq = buf[2];
+
+	rc = ieee802154_hdr_minlen(hdr->fc);
+	if (rc < 0 || buf + rc > skb->tail)
 		return -EINVAL;
 
-	if (hdr->fc & IEEE802154_FC_INTRA_PAN)
-		hdr->source.pan_id = hdr->dest.pan_id;
-
-	if ((hdr->fc & IEEE802154_FC_SECEN) &&
-	    ieee802154_hdr_pull_sechdr(skb, &hdr->sec))
-		return -EINVAL;
-
+	ieee802154_hdr_get_addrs(skb->data + pos, hdr);
 	return 0;
 }

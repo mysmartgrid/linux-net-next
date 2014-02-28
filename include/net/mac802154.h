@@ -51,13 +51,24 @@ struct ieee802154_hdr {
 	struct ieee802154_sechdr sec;
 };
 
-/* pushed hdr onto the skb. fields of hdr->fc that can be calculated from
+/* pushes hdr onto the skb. fields of hdr->fc that can be calculated from
  * the contents of hdr will be, and the actual value of those bits in
  * hdr->fc will be ignored. this includes the INTRA_PAN bit and the frame
  * version, if SECEN is set.
  */
 int ieee802154_hdr_push(struct sk_buff *skb, const struct ieee802154_hdr *hdr);
+
+/* pulls the entire 802.15.4 header off of the skb, including the security
+ * header, and performs pan id decompression
+ */
 int ieee802154_hdr_pull(struct sk_buff *skb, struct ieee802154_hdr *hdr);
+
+/* parses the address fields in a given skb and stores them into hdr,
+ * performing pan id decompression and length checks to be suitable for use in
+ * header_ops.parse
+ */
+int ieee802154_hdr_peek_addrs(const struct sk_buff *skb,
+			      struct ieee802154_hdr *hdr);
 
 /* The following flags are used to indicate changed address settings from
  * the stack to the hardware.
