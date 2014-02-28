@@ -130,7 +130,9 @@ ieee802154_hdr_push(struct sk_buff *skb, const struct ieee802154_hdr *hdr)
 	pos += rc;
 
 	if (fc & IEEE802154_FC_SECEN) {
-		IEEE802154_FC_SET_VERSION(fc, 1);
+		fc &= ~IEEE802154_FC_VERSION_MASK;
+		fc |= (1 << IEEE802154_FC_VERSION_SHIFT)
+			& IEEE802154_FC_VERSION_MASK;
 
 		rc = ieee802154_hdr_push_sechdr(buf + pos, &hdr->sec);
 		if (rc < 0)

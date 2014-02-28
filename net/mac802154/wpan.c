@@ -161,7 +161,8 @@ static int mac802154_header_create(struct sk_buff *skb,
 		fc |= IEEE802154_FC_ACK_REQ;
 
 	fc |= IEEE802154_FC_SECEN;
-	IEEE802154_FC_SET_VERSION(fc, 1);
+	fc &= ~IEEE802154_FC_VERSION_MASK;
+	fc |= (1 << IEEE802154_FC_VERSION_SHIFT) & IEEE802154_FC_VERSION_MASK;
 
 	if (!saddr) {
 		spin_lock_bh(&priv->mib_lock);
