@@ -256,6 +256,19 @@ lowpan_fragment_xmit(struct sk_buff *skb, u8 *head,
 	return dev_queue_xmit(frag);
 }
 
+static int lowpan_fragment_plen(struct sk_buff *skb, int extra)
+{
+	struct ieee802154_hdr hdr;
+
+	ieee802154_hdr_peek(skb, &hdr);
+
+	/* calc the nearest payload length(divided to 8) for a fragment with
+	 * a given 802.15.4 hdr and additional lowpan headers which fits into
+	 * IEEE802154_MTU
+	 */
+	return round_down(ieee802154_max_payload(&hdr) - extra, 8);
+}
+
 static int
 lowpan_skb_fragmentation(struct sk_buff *skb, struct net_device *dev)
 {
@@ -277,12 +290,8 @@ lowpan_skb_fragmentation(struct sk_buff *skb, struct net_device *dev)
 	head[1] = dgram_size & 0xff;
 	memcpy(head + 2, &tag, sizeof(tag));
 
-	/* calc the nearest payload length(divided to 8) for first fragment
-	 * which fits into a IEEE802154_MTU
-	 */
-	frag_plen = round_down(IEEE802154_MTU - header_length -
-			       LOWPAN_FRAG1_HEAD_SIZE - lowpan_size -
-			       IEEE802154_MFR_SIZE, 8);
+	frag_plen = lowpan_fragment_plen(skb, LOWPAN_FRAG1_HEAD_SIZE +
+					 lowpan_size);
 
 	err = lowpan_fragment_xmit(skb, head, header_length,
 				   frag_plen + lowpan_size, 0,
@@ -300,8 +309,7 @@ lowpan_skb_fragmentation(struct sk_buff *skb, struct net_device *dev)
 	head[0] &= ~LOWPAN_DISPATCH_FRAG1;
 	head[0] |= LOWPAN_DISPATCH_FRAGN;
 
-	frag_plen = round_down(IEEE802154_MTU - header_length -
-			       LOWPAN_FRAGN_HEAD_SIZE - IEEE802154_MFR_SIZE, 8);
+	frag_plen = lowpan_fragment_plen(skb, LOWPAN_FRAGN_HEAD_SIZE);
 
 	while (payload_length - offset > 0) {
 		int len = frag_plen;
