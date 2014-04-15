@@ -211,6 +211,7 @@ static int dgram_sendmsg(struct kiocb *iocb, struct sock *sk,
 	struct sk_buff *skb;
 	struct ieee802154_mac_cb *cb;
 	struct dgram_sock *ro = dgram_sk(sk);
+	struct ieee802154_addr dst_addr;
 	int hlen, tlen;
 	int err;
 
@@ -254,8 +255,16 @@ static int dgram_sendmsg(struct kiocb *iocb, struct sock *sk,
 	cb->type = IEEE802154_FC_TYPE_DATA;
 	cb->ackreq = ro->want_ack;
 
-	err = dev_hard_header(skb, dev, ETH_P_IEEE802154, &ro->dst_addr,
-			ro->bound ? &ro->src_addr : NULL, size);
+	if (msg->msg_name) {
+		DECLARE_SOCKADDR(struct sockaddr_ieee802154*, daddr, msg->msg_name);
+
+		ieee802154_addr_from_sa(&dst_addr, &daddr->addr);
+	} else {
+		dst_addr = ro->dst_addr;
+	}
+
+	err = dev_hard_header(skb, dev, ETH_P_IEEE802154, &dst_addr,
+			      ro->bound ? &ro->src_addr : NULL, size);
 	if (err < 0)
 		goto out_skb;
 
