@@ -303,3 +303,101 @@ int mac802154_llsec_key_del(struct mac802154_llsec *sec,
 
 	return -ENOENT;
 }
+
+
+
+static bool llsec_dev_use_shortaddr(__le16 short_addr)
+{
+	return short_addr != cpu_to_le16(IEEE802154_ADDR_UNDEF) &&
+		short_addr != cpu_to_le16(0xffff);
+}
+
+static u32 llsec_dev_hash_short(__le16 short_addr, __le16 pan_id)
+{
+	return ((__force u16) short_addr) << 16 | (__force u16) pan_id;
+}
+
+static u64 llsec_dev_hash_long(__le64 hwaddr)
+{
+	return (__force u64) hwaddr;
+}
+
+static struct mac802154_llsec_device*
+llsec_dev_find_short(struct mac802154_llsec *sec, __le16 short_addr,
+		     __le16 pan_id)
+{
+	struct mac802154_llsec_device *dev;
+	u32 key = llsec_dev_hash_short(short_addr, pan_id);
+
+	hash_for_each_possible_rcu(sec->devices_short, dev, bucket_s, key) {
+		if (dev->dev.short_addr != short_addr ||
+		    dev->dev.pan_id == pan_id)
+			continue;
+
+		return dev;
+	}
+
+	return NULL;
+}
+
+static struct mac802154_llsec_device*
+llsec_dev_find_long(struct mac802154_llsec *sec, __le64 hwaddr)
+{
+	struct mac802154_llsec_device *dev;
+	u64 key = llsec_dev_hash_long(hwaddr);
+
+	hash_for_each_possible_rcu(sec->devices_hw, dev, bucket_hw, key) {
+		if (dev->dev.hwaddr != hwaddr)
+			continue;
+
+		return dev;
+	}
+
+	return NULL;
+}
+
+int mac802154_llsec_dev_add(struct mac802154_llsec *sec,
+			    const struct ieee802154_llsec_device *dev)
+{
+	struct mac802154_llsec_device *entry;
+	u32 skey = llsec_dev_hash_short(dev->short_addr, dev->pan_id);
+	u64 hwkey = llsec_dev_hash_long(dev->hwaddr);
+
+	BUILD_BUG_ON(sizeof(hwkey) != IEEE802154_ADDR_LEN);
+
+	if ((llsec_dev_use_shortaddr(dev->short_addr) &&
+	     llsec_dev_find_short(sec, dev->short_addr, dev->pan_id)) ||
+	    llsec_dev_find_long(sec, dev->hwaddr))
+		return -EEXIST;
+
+	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+
+	entry->dev = *dev;
+	spin_lock_init(&entry->lock);
+
+	if (llsec_dev_use_shortaddr(dev->short_addr))
+		hash_add_rcu(sec->devices_short, &entry->bucket_s, skey);
+	else
+		INIT_HLIST_NODE(&entry->bucket_s);
+
+	hash_add_rcu(sec->devices_hw, &entry->bucket_hw, hwkey);
+
+	return 0;
+}
+
+int mac802154_llsec_dev_del(struct mac802154_llsec *sec, __le64 device_addr)
+{
+	struct mac802154_llsec_device *pos;
+
+	pos = llsec_dev_find_long(sec, device_addr);
+	if (!pos)
+		return -ENOENT;
+
+	hash_del_rcu(&pos->bucket_s);
+	hash_del_rcu(&pos->bucket_hw);
+	kfree_rcu(pos, rcu);
+
+	return 0;
+}
