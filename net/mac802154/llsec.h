@@ -74,4 +74,13 @@ struct mac802154_llsec {
 	spinlock_t lock;
 };
 
+void mac802154_llsec_init(struct mac802154_llsec *sec);
+void mac802154_llsec_destroy(struct mac802154_llsec *sec);
+
+int mac802154_llsec_get_params(struct mac802154_llsec *sec,
+			       struct ieee802154_llsec_params *params);
+int mac802154_llsec_set_params(struct mac802154_llsec *sec,
+			       const struct ieee802154_llsec_params *params,
+			       int changed);
+
 #endif /* MAC802154_LLSEC_H */
