@@ -83,4 +83,10 @@ int mac802154_llsec_set_params(struct mac802154_llsec *sec,
 			       const struct ieee802154_llsec_params *params,
 			       int changed);
 
+int mac802154_llsec_key_add(struct mac802154_llsec *sec,
+			    const struct ieee802154_llsec_key_id *id,
+			    const struct ieee802154_llsec_key *key);
+int mac802154_llsec_key_del(struct mac802154_llsec *sec,
+			    const struct ieee802154_llsec_key_id *key);
+
 #endif /* MAC802154_LLSEC_H */

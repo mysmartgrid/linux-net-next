@@ -26,6 +26,10 @@
 #include "mac802154.h"
 #include "llsec.h"
 
+static void llsec_key_put(struct mac802154_llsec_key *key);
+static bool llsec_key_id_equal(const struct ieee802154_llsec_key_id *a,
+			       const struct ieee802154_llsec_key_id *b);
+
 void mac802154_llsec_init(struct mac802154_llsec *sec)
 {
 	memset(sec, 0, sizeof(*sec));
@@ -128,4 +132,174 @@ int mac802154_llsec_set_params(struct mac802154_llsec *sec,
 	spin_unlock(&sec->lock);
 
 	return 0;
+}
+
+
+
+static struct mac802154_llsec_key*
+llsec_key_alloc(const u8 *key_bytes)
+{
+	static const int authsizes[3] = { 4, 8, 16 };
+	struct mac802154_llsec_key *key;
+	int i;
+
+	key = kzalloc(sizeof(*key), GFP_KERNEL);
+	if (!key)
+		return NULL;
+
+	kref_init(&key->ref);
+	memcpy(key->key.key, key_bytes, IEEE802154_LLSEC_KEY_SIZE);
+
+	BUILD_BUG_ON(ARRAY_SIZE(authsizes) != ARRAY_SIZE(key->tfm));
+
+	for (i = 0; i < ARRAY_SIZE(key->tfm); i++) {
+		key->tfm[i] = crypto_alloc_aead("ccm(aes)", 0,
+						CRYPTO_ALG_ASYNC);
+		if (!key->tfm[i])
+			goto err_tfm;
+		if (crypto_aead_setkey(key->tfm[i], key_bytes,
+				       IEEE802154_LLSEC_KEY_SIZE))
+			goto err_tfm;
+		if (crypto_aead_setauthsize(key->tfm[i], authsizes[i]))
+			goto err_tfm;
+	}
+
+	key->tfm0 = crypto_alloc_blkcipher("ctr(aes)", 0, 0);
+	if (!key->tfm0)
+		goto err_tfm;
+
+	if (crypto_blkcipher_setkey(key->tfm0, key_bytes,
+				    IEEE802154_LLSEC_KEY_SIZE))
+		goto err_tfm0;
+
+	return key;
+
+err_tfm0:
+	crypto_free_blkcipher(key->tfm0);
+err_tfm:
+	for (i = 0; i < ARRAY_SIZE(key->tfm); i++)
+		if (key->tfm[i])
+			crypto_free_aead(key->tfm[i]);
+
+	kfree(key);
+	return NULL;
+}
+
+static void llsec_key_release(struct kref *ref)
+{
+	struct mac802154_llsec_key *key;
+	int i;
+
+	key = container_of(ref, struct mac802154_llsec_key, ref);
+
+	for (i = 0; i < ARRAY_SIZE(key->tfm); i++)
+		crypto_free_aead(key->tfm[i]);
+
+	crypto_free_blkcipher(key->tfm0);
+	kfree(key);
+}
+
+static struct mac802154_llsec_key*
+llsec_key_get(struct mac802154_llsec_key *key)
+{
+	kref_get(&key->ref);
+	return key;
+}
+
+static void llsec_key_put(struct mac802154_llsec_key *key)
+{
+	kref_put(&key->ref, llsec_key_release);
+}
+
+static bool llsec_key_id_equal(const struct ieee802154_llsec_key_id *a,
+			       const struct ieee802154_llsec_key_id *b)
+{
+	if (a->mode != b->mode)
+		return false;
+
+	if (a->mode == IEEE802154_SCF_KEY_IMPLICIT)
+		return ieee802154_addr_equal(&a->device_addr, &b->device_addr);
+
+	if (a->id != b->id)
+		return false;
+
+	switch (a->mode) {
+	case IEEE802154_SCF_KEY_SHORT_INDEX:
+		return a->short_source == b->short_source;
+	case IEEE802154_SCF_KEY_HW_INDEX:
+		return a->extended_source == b->extended_source;
+	}
+
+	return true;
+}
+
+int mac802154_llsec_key_add(struct mac802154_llsec *sec,
+			    const struct ieee802154_llsec_key_id *id,
+			    const struct ieee802154_llsec_key *key)
+{
+	struct mac802154_llsec_key *mkey = NULL;
+	struct ieee802154_llsec_key_entry *pos, *new;
+
+	if (!(key->frame_types & (1 << IEEE802154_FC_TYPE_MAC_CMD)) &&
+	    key->cmd_frame_ids)
+		return -EINVAL;
+
+	list_for_each_entry(pos, &sec->table.keys, list) {
+		if (llsec_key_id_equal(&pos->id, id))
+			return -EEXIST;
+
+		if (memcmp(pos->key->key, key->key,
+			   IEEE802154_LLSEC_KEY_SIZE))
+			continue;
+
+		mkey = container_of(pos->key, struct mac802154_llsec_key, key);
+
+		if (pos->key->frame_types != key->frame_types ||
+		    pos->key->cmd_frame_ids != key->cmd_frame_ids)
+			return -EEXIST;
+
+		break;
+	}
+
+	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	if (!new)
+		return -ENOMEM;
+
+	if (!key)
+		mkey = llsec_key_alloc(key->key);
+	else
+		mkey = llsec_key_get(mkey);
+
+	if (!mkey)
+		goto fail;
+
+	new->id = *id;
+	new->key = &mkey->key;
+
+	list_add_rcu(&new->list, &sec->table.keys);
+
+	return 0;
+
+fail:
+	kfree(new);
+	return -ENOMEM;
+}
+
+int mac802154_llsec_key_del(struct mac802154_llsec *sec,
+			    const struct ieee802154_llsec_key_id *key)
+{
+	struct ieee802154_llsec_key_entry *pos;
+
+	list_for_each_entry(pos, &sec->table.keys, list) {
+		struct mac802154_llsec_key *mkey;
+
+		mkey = container_of(pos->key, struct mac802154_llsec_key, key);
+
+		if (llsec_key_id_equal(&pos->id, key)) {
+			llsec_key_put(mkey);
+			return 0;
+		}
+	}
+
+	return -ENOENT;
 }
