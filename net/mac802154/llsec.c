@@ -522,3 +522,216 @@ int mac802154_llsec_seclevel_del(struct mac802154_llsec *sec,
 
 	return 0;
 }
+
+
+
+static int llsec_recover_addr(const struct mac802154_llsec *sec,
+			      struct ieee802154_addr *addr)
+{
+	__le16 caddr = sec->params.coord_shortaddr;
+
+	addr->pan_id = sec->params.pan_id;
+
+	if (caddr == cpu_to_le16(IEEE802154_ADDR_BROADCAST)) {
+		return -EINVAL;
+	} else if (caddr == cpu_to_le16(IEEE802154_ADDR_UNDEF)) {
+		addr->extended_addr = sec->params.coord_hwaddr;
+		addr->mode = IEEE802154_ADDR_LONG;
+	} else {
+		addr->short_addr = sec->params.coord_shortaddr;
+		addr->mode = IEEE802154_ADDR_SHORT;
+	}
+
+	return 0;
+}
+
+static struct mac802154_llsec_key*
+llsec_lookup_key(const struct mac802154_llsec *sec,
+		 const struct ieee802154_hdr *hdr,
+		 const struct ieee802154_addr *addr,
+		 struct ieee802154_llsec_key_id *key_id)
+{
+	struct ieee802154_addr devaddr = *addr;
+	u8 key_id_mode = hdr->sec.key_id_mode;
+	struct ieee802154_llsec_key_entry *key_entry;
+	struct mac802154_llsec_key *key;
+
+	if (key_id_mode == IEEE802154_SCF_KEY_IMPLICIT &&
+	    devaddr.mode == IEEE802154_ADDR_NONE) {
+		if (hdr->fc.type == IEEE802154_FC_TYPE_BEACON) {
+			devaddr.extended_addr = sec->params.coord_hwaddr;
+			devaddr.mode = IEEE802154_ADDR_LONG;
+		} else if (llsec_recover_addr(sec, &devaddr) < 0) {
+			return NULL;
+		}
+	}
+
+	list_for_each_entry_rcu(key_entry, &sec->table.keys, list) {
+		const struct ieee802154_llsec_key_id *id = &key_entry->id;
+
+		if (!(key_entry->key->frame_types & BIT(hdr->fc.type)))
+			continue;
+
+		if (id->mode != key_id_mode)
+			continue;
+
+		if (key_id_mode == IEEE802154_SCF_KEY_IMPLICIT) {
+			if (ieee802154_addr_equal(&devaddr, &id->device_addr))
+				goto found;
+		} else {
+			if (id->id != hdr->sec.key_id)
+				continue;
+
+			if ((key_id_mode == IEEE802154_SCF_KEY_SHORT_INDEX &&
+			     id->short_source == hdr->sec.short_src) ||
+			    (key_id_mode == IEEE802154_SCF_KEY_HW_INDEX &&
+			     id->extended_source == hdr->sec.extended_src))
+				goto found;
+		}
+	}
+
+	return NULL;
+
+found:
+	key = container_of(key_entry->key, struct mac802154_llsec_key, key);
+	if (key_id)
+		*key_id = key_entry->id;
+	return llsec_key_get(key);
+}
+
+
+static void llsec_geniv(u8 iv[16], __le64 addr,
+			const struct ieee802154_sechdr *sec)
+{
+	__be64 addr_bytes = (__force __be64) swab64((__force u64) addr);
+	__be32 frame_counter = (__force __be32) swab32((__force u32) sec->frame_counter);
+
+	iv[0] = 1; /* L' = L - 1 = 1 */
+	memcpy(iv + 1, &addr_bytes, sizeof(addr_bytes));
+	memcpy(iv + 9, &frame_counter, sizeof(frame_counter));
+	iv[13] = sec->level;
+	iv[14] = 0;
+	iv[15] = 1;
+}
+
+static struct crypto_aead*
+llsec_tfm_by_len(struct mac802154_llsec_key *key, int authlen)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(key->tfm); i++)
+		if (crypto_aead_authsize(key->tfm[i]) == authlen)
+			return key->tfm[i];
+
+	BUG();
+}
+
+static int llsec_do_encrypt(struct sk_buff *skb,
+			    const struct mac802154_llsec *sec,
+			    const struct ieee802154_hdr *hdr,
+			    struct mac802154_llsec_key *key)
+{
+	u8 iv[16];
+	u8 *data;
+	int data_len, authlen, rc;
+	struct scatterlist src, dst[2];
+
+	authlen = ieee802154_sechdr_authtag_len(&hdr->sec);
+	llsec_geniv(iv, sec->params.hwaddr, &hdr->sec);
+
+	data = skb->data;
+	data_len = skb->len;
+
+	sg_init_one(&src, data, data_len);
+	sg_init_table(dst, 2);
+	sg_set_buf(&dst[0], data, data_len);
+	sg_set_buf(&dst[1], skb_put(skb, authlen), authlen);
+
+	if (authlen) {
+		struct crypto_aead *tfm = llsec_tfm_by_len(key, authlen);
+		struct aead_request *req;
+
+		req = kzalloc(sizeof(*req) + crypto_aead_reqsize(tfm),
+			      GFP_ATOMIC);
+		if (!req)
+			return -ENOMEM;
+
+		aead_request_set_tfm(req, tfm);
+		aead_request_set_crypt(req, &src, dst, data_len, iv);
+
+		rc = crypto_aead_encrypt(req);
+
+		kfree(req);
+	} else {
+		struct blkcipher_desc req = {
+			.tfm = key->tfm0,
+			.info = iv,
+			.flags = 0,
+		};
+
+		rc = crypto_blkcipher_encrypt_iv(&req, dst, &src, data_len);
+	}
+
+	return rc;
+}
+
+int mac802154_llsec_encrypt(struct mac802154_llsec *sec, struct sk_buff *skb)
+{
+	struct ieee802154_hdr hdr;
+	int rc, authlen, hlen;
+	struct mac802154_llsec_key *key;
+	u32 frame_ctr;
+
+	hlen = ieee802154_hdr_pull(skb, &hdr);
+
+	if (hlen < 0 || hdr.fc.type != IEEE802154_FC_TYPE_DATA ||
+	    (hdr.fc.security_enabled && hdr.sec.level == 0))
+		return -EINVAL;
+
+	if (!hdr.fc.security_enabled) {
+		skb_push(skb, hlen);
+		return 0;
+	}
+
+	authlen = ieee802154_sechdr_authtag_len(&hdr.sec);
+
+	if (skb->len + hlen + authlen + IEEE802154_MFR_SIZE > IEEE802154_MTU)
+		return -EMSGSIZE;
+
+	rcu_read_lock();
+
+	key = llsec_lookup_key(sec, &hdr, &hdr.dest, NULL);
+	if (!key) {
+		rc = -ENOKEY;
+		goto fail;
+	}
+
+	spin_lock(&sec->lock);
+
+	frame_ctr = be32_to_cpu(sec->params.frame_counter);
+	hdr.sec.frame_counter = cpu_to_le32(frame_ctr);
+	if (frame_ctr == 0xFFFFFFFF) {
+		spin_unlock(&sec->lock);
+		llsec_key_put(key);
+		rc = -EOVERFLOW;
+		goto fail;
+	}
+
+	sec->params.frame_counter = cpu_to_be32(frame_ctr + 1);
+
+	spin_unlock(&sec->lock);
+
+	rcu_read_unlock();
+
+	rc = llsec_do_encrypt(skb, sec, &hdr, key);
+	llsec_key_put(key);
+
+	if (!rc)
+		rc = ieee802154_hdr_push(skb, &hdr);
+
+	return rc;
+
+fail:
+	rcu_read_unlock();
+	return rc;
+}
