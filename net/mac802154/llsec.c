@@ -401,3 +401,67 @@ int mac802154_llsec_dev_del(struct mac802154_llsec *sec, __le64 device_addr)
 
 	return 0;
 }
+
+
+
+static struct mac802154_llsec_device_key*
+llsec_devkey_find(struct mac802154_llsec_device *dev,
+		  const struct ieee802154_llsec_key_id *key)
+{
+	struct ieee802154_llsec_device_key *devkey;
+
+	list_for_each_entry_rcu(devkey, &dev->dev.keys, list) {
+		if (!llsec_key_id_equal(key, &devkey->key_id))
+			continue;
+		
+		return container_of(devkey, struct mac802154_llsec_device_key,
+				    devkey);
+	}
+
+	return NULL;
+}
+
+int mac802154_llsec_devkey_add(struct mac802154_llsec *sec,
+			       __le64 dev_addr,
+			       const struct ieee802154_llsec_device_key *key)
+{
+	struct mac802154_llsec_device *dev;
+	struct mac802154_llsec_device_key *devkey;
+
+	dev = llsec_dev_find_long(sec, dev_addr);
+
+	if (!dev)
+		return -ENOENT;
+
+	if (llsec_devkey_find(dev, &key->key_id))
+		return -EEXIST;
+
+	devkey = kmalloc(sizeof(*devkey), GFP_KERNEL);
+	if (!devkey)
+		return -ENOMEM;
+
+	devkey->devkey = *key;
+	list_add_tail_rcu(&devkey->devkey.list, &dev->dev.keys);
+	return 0;
+}
+
+int mac802154_llsec_devkey_del(struct mac802154_llsec *sec,
+			       __le64 dev_addr,
+			       const struct ieee802154_llsec_device_key *key)
+{
+	struct mac802154_llsec_device *dev;
+	struct mac802154_llsec_device_key *devkey;
+
+	dev = llsec_dev_find_long(sec, dev_addr);
+
+	if (!dev)
+		return -ENOENT;
+
+	devkey = llsec_devkey_find(dev, &key->key_id);
+	if (!devkey)
+		return -ENOENT;
+
+	list_del_rcu(&devkey->devkey.list);
+	kfree_rcu(devkey, rcu);
+	return 0;
+}
