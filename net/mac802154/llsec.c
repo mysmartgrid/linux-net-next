@@ -735,3 +735,214 @@ fail:
 	rcu_read_unlock();
 	return rc;
 }
+
+
+
+static struct mac802154_llsec_device*
+llsec_lookup_dev(const struct mac802154_llsec *sec,
+		 const struct ieee802154_addr *addr)
+{
+	struct ieee802154_addr devaddr = *addr;
+	struct mac802154_llsec_device *dev = NULL;
+
+	if (devaddr.mode == IEEE802154_ADDR_NONE &&
+	    llsec_recover_addr(sec, &devaddr) < 0)
+		return NULL;
+
+	if (devaddr.mode == IEEE802154_ADDR_SHORT) {
+		u32 key = llsec_dev_hash_short(devaddr.short_addr,
+					       devaddr.pan_id);
+
+		hash_for_each_possible_rcu(sec->devices_short, dev,
+				           bucket_s, key) {
+			if (dev->dev.pan_id == devaddr.pan_id &&
+			    dev->dev.short_addr == devaddr.short_addr)
+				return dev;
+		}
+	} else {
+		u64 key = llsec_dev_hash_long(devaddr.extended_addr);
+
+		hash_for_each_possible_rcu(sec->devices_hw, dev,
+				           bucket_hw, key) {
+			if (dev->dev.hwaddr == devaddr.extended_addr)
+				return dev;
+		}
+	}
+
+	return NULL;
+}
+
+static int
+llsec_lookup_seclevel(const struct mac802154_llsec *sec,
+		      u8 frame_type, u8 cmd_frame_id,
+		      struct ieee802154_llsec_seclevel *rlevel)
+{
+	struct ieee802154_llsec_seclevel *level;
+
+	list_for_each_entry_rcu(level, &sec->table.security_levels, list) {
+		if (level->frame_type == frame_type &&
+		    (frame_type != IEEE802154_FC_TYPE_MAC_CMD ||
+		     level->cmd_frame_id == cmd_frame_id)) {
+			*rlevel = *level;
+			return 0;
+		}
+	}
+
+	return -EINVAL;
+}
+
+static int
+llsec_do_decrypt(struct sk_buff *skb,
+		 const struct mac802154_llsec *sec,
+		 const struct ieee802154_hdr *hdr,
+		 struct mac802154_llsec_key *key,
+		 const __le64 dev_addr)
+{
+	u8 iv[16];
+	u8 *data;
+	int data_len, authlen, rc;
+	struct scatterlist src;
+
+	authlen = ieee802154_sechdr_authtag_len(&hdr->sec);
+	llsec_geniv(iv, dev_addr, &hdr->sec);
+
+	data = skb_mac_header(skb) + skb->mac_len;
+	data_len = skb->tail - data;
+
+	sg_init_one(&src, data, data_len);
+
+	if (authlen) {
+		struct crypto_aead *tfm = llsec_tfm_by_len(key, authlen);
+		struct aead_request *req;
+
+		req = kzalloc(sizeof(*req) + crypto_aead_reqsize(tfm),
+			      GFP_ATOMIC);
+		if (!req)
+			return -ENOMEM;
+
+		aead_request_set_tfm(req, tfm);
+		aead_request_set_crypt(req, &src, &src, data_len, iv);
+
+		rc = crypto_aead_decrypt(req);
+
+		kfree(req);
+	} else {
+		struct blkcipher_desc req = {
+			.tfm = key->tfm0,
+			.info = iv,
+			.flags = 0,
+		};
+
+		rc = crypto_blkcipher_decrypt_iv(&req, &src, &src, data_len);
+	}
+
+	skb_trim(skb, skb->len - authlen);
+
+	return rc;
+}
+
+static int
+llsec_update_devkey_info(struct mac802154_llsec_device *dev,
+			 const struct ieee802154_llsec_key_id *in_key,
+			 u32 frame_counter)
+{
+	struct mac802154_llsec_device_key *devkey = NULL;
+
+	if (dev->dev.key_mode == IEEE802154_LLSEC_DEVKEY_RESTRICT) {
+		devkey = llsec_devkey_find(dev, in_key);
+		if (!devkey)
+			return -ENOENT;
+	}
+
+	spin_lock(&dev->lock);
+
+	if ((!devkey && frame_counter < dev->dev.frame_counter) ||
+	    (devkey && frame_counter < devkey->devkey.frame_counter)) {
+		spin_unlock(&dev->lock);
+		return -EINVAL;
+	}
+
+	if (devkey)
+		devkey->devkey.frame_counter = frame_counter + 1;
+	else
+		dev->dev.frame_counter = frame_counter + 1;
+
+	spin_unlock(&dev->lock);
+
+	return 0;
+}
+
+int mac802154_llsec_decrypt(struct mac802154_llsec *sec, struct sk_buff *skb)
+{
+	struct ieee802154_hdr hdr;
+	struct mac802154_llsec_key *key;
+	struct ieee802154_llsec_key_id key_id;
+	struct mac802154_llsec_device *dev;
+	struct ieee802154_llsec_seclevel seclevel;
+	int err;
+	__le64 dev_addr;
+	u32 frame_ctr;
+
+	if (ieee802154_hdr_peek(skb, &hdr) < 0)
+		return -EINVAL;
+	if (hdr.fc.security_enabled && hdr.fc.version == 0)
+		return -EINVAL;
+	if (hdr.sec.level == 0)
+		return -EINVAL;
+
+	rcu_read_lock();
+
+	key = llsec_lookup_key(sec, &hdr, &hdr.source, &key_id);
+	if (!key) {
+		err = -ENOKEY;
+		goto fail;
+	}
+
+	dev = llsec_lookup_dev(sec, &hdr.source);
+	if (!dev) {
+		err = -EINVAL;
+		goto fail_dev;
+	}
+
+	if (llsec_lookup_seclevel(sec, hdr.fc.type, 0, &seclevel) < 0) {
+		err = -EINVAL;
+		goto fail_dev;
+	}
+
+	if (!(seclevel.sec_levels & BIT(hdr.sec.level)) &&
+	    (hdr.sec.level == 0 && seclevel.device_override &&
+	     !dev->dev.seclevel_exempt)) {
+		err = -EINVAL;
+		goto fail_dev;
+	}
+
+	if (hdr.sec.level == 0)
+		goto out_without_decrypt;
+
+	frame_ctr = le32_to_cpu(hdr.sec.frame_counter);
+
+	if (frame_ctr == 0xffffffff) {
+		err = -EOVERFLOW;
+		goto fail_dev;
+	}
+
+	err = llsec_update_devkey_info(dev, &key_id, frame_ctr);
+	if (err)
+		goto fail_dev;
+
+	dev_addr = dev->dev.hwaddr;
+
+	rcu_read_unlock();
+
+	err = llsec_do_decrypt(skb, sec, &hdr, key, dev_addr);
+	llsec_key_put(key);
+	return err;
+
+out_without_decrypt:
+	err = 0;
+fail_dev:
+	llsec_key_put(key);
+fail:
+	rcu_read_unlock();
+	return err;
+}
