@@ -465,3 +465,60 @@ int mac802154_llsec_devkey_del(struct mac802154_llsec *sec,
 	kfree_rcu(devkey, rcu);
 	return 0;
 }
+
+
+
+static struct mac802154_llsec_seclevel*
+llsec_find_seclevel(const struct mac802154_llsec *sec,
+		    const struct ieee802154_llsec_seclevel *sl)
+{
+	struct ieee802154_llsec_seclevel *pos;
+
+	list_for_each_entry(pos, &sec->table.security_levels, list) {
+		if (pos->frame_type != sl->frame_type ||
+		    (pos->frame_type == IEEE802154_FC_TYPE_MAC_CMD &&
+		     pos->cmd_frame_id != sl->cmd_frame_id) ||
+		    pos->device_override != sl->device_override ||
+		    pos->sec_levels != sl->sec_levels)
+			continue;
+
+		return container_of(pos, struct mac802154_llsec_seclevel,
+				    level);
+	}
+
+	return NULL;
+}
+
+int mac802154_llsec_seclevel_add(struct mac802154_llsec *sec,
+				 const struct ieee802154_llsec_seclevel *sl)
+{
+	struct mac802154_llsec_seclevel *entry;
+
+	if (llsec_find_seclevel(sec, sl))
+		return -EEXIST;
+
+	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+
+	entry->level = *sl;
+
+	list_add_tail_rcu(&entry->level.list, &sec->table.security_levels);
+
+	return 0;
+}
+
+int mac802154_llsec_seclevel_del(struct mac802154_llsec *sec,
+				 const struct ieee802154_llsec_seclevel *sl)
+{
+	struct mac802154_llsec_seclevel *pos;
+
+	pos = llsec_find_seclevel(sec, sl);
+	if (!pos)
+		return -ENOENT;
+
+	list_del_rcu(&pos->level.list);
+	kfree_rcu(pos, rcu);
+
+	return 0;
+}

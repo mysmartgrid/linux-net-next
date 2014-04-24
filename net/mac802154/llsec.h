@@ -101,4 +101,9 @@ int mac802154_llsec_devkey_del(struct mac802154_llsec *sec,
 			       __le64 dev_addr,
 			       const struct ieee802154_llsec_device_key *key);
 
+int mac802154_llsec_seclevel_add(struct mac802154_llsec *sec,
+				 const struct ieee802154_llsec_seclevel *sl);
+int mac802154_llsec_seclevel_del(struct mac802154_llsec *sec,
+				 const struct ieee802154_llsec_seclevel *sl);
+
 #endif /* MAC802154_LLSEC_H */
