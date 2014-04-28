@@ -21,6 +21,7 @@
  * Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
  */
 
+#include <linux/capability.h>
 #include <linux/net.h>
 #include <linux/module.h>
 #include <linux/if_arp.h>
@@ -46,6 +47,10 @@ struct dgram_sock {
 
 	unsigned int bound:1;
 	unsigned int want_ack:1;
+	unsigned int secen:1;
+	unsigned int secen_override:1;
+	unsigned int seclevel:3;
+	unsigned int seclevel_override:1;
 };
 
 static inline struct dgram_sock *dgram_sk(const struct sock *sk)
@@ -263,6 +268,11 @@ static int dgram_sendmsg(struct kiocb *iocb, struct sock *sk,
 		dst_addr = ro->dst_addr;
 	}
 
+	cb->secen = ro->secen;
+	cb->secen_override = ro->secen_override;
+	cb->seclevel = ro->seclevel;
+	cb->seclevel_override = ro->seclevel_override;
+
 	err = dev_hard_header(skb, dev, ETH_P_IEEE802154, &dst_addr,
 			      ro->bound ? &ro->src_addr : NULL, size);
 	if (err < 0)
@@ -426,6 +436,20 @@ static int dgram_getsockopt(struct sock *sk, int level, int optname,
 	case WPAN_WANTACK:
 		val = ro->want_ack;
 		break;
+	case WPAN_SECURITY:
+		if (!ro->secen_override)
+			val = WPAN_SECURITY_DEFAULT;
+		else if (ro->secen)
+			val = WPAN_SECURITY_ON;
+		else
+			val = WPAN_SECURITY_OFF;
+		break;
+	case WPAN_SECURITY_LEVEL:
+		if (!ro->seclevel_override)
+			val = WPAN_SECURITY_LEVEL_DEFAULT;
+		else
+			val = ro->seclevel;
+		break;
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -441,6 +465,7 @@ static int dgram_setsockopt(struct sock *sk, int level, int optname,
 		    char __user *optval, unsigned int optlen)
 {
 	struct dgram_sock *ro = dgram_sk(sk);
+	struct net *net = sock_net(sk);
 	int val;
 	int err = 0;
 
@@ -455,6 +480,46 @@ static int dgram_setsockopt(struct sock *sk, int level, int optname,
 	switch (optname) {
 	case WPAN_WANTACK:
 		ro->want_ack = !!val;
+		break;
+	case WPAN_SECURITY:
+		if (!ns_capable(net->user_ns, CAP_NET_ADMIN) &&
+		    !ns_capable(net->user_ns, CAP_NET_RAW)) {
+			err = -EPERM;
+			break;
+		}
+
+		switch (val) {
+		case WPAN_SECURITY_DEFAULT:
+			ro->secen_override = 0;
+			break;
+		case WPAN_SECURITY_ON:
+			ro->secen_override = 1;
+			ro->secen = 1;
+			break;
+		case WPAN_SECURITY_OFF:
+			ro->secen_override = 1;
+			ro->secen = 0;
+			break;
+		default:
+			err = -EINVAL;
+			break;
+		}
+		break;
+	case WPAN_SECURITY_LEVEL:
+		if (!ns_capable(net->user_ns, CAP_NET_ADMIN) &&
+		    !ns_capable(net->user_ns, CAP_NET_RAW)) {
+			err = -EPERM;
+			break;
+		}
+
+		if (val > WPAN_SECURITY_LEVEL_DEFAULT || val < 0) {
+			err = -EINVAL;
+		} else if (val == WPAN_SECURITY_LEVEL_DEFAULT) {
+			ro->seclevel_override = 0;
+		} else {
+			ro->seclevel_override = 1;
+			ro->seclevel = val;
+		}
 		break;
 	default:
 		err = -ENOPROTOOPT;
