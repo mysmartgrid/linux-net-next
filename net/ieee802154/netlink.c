@@ -124,6 +124,8 @@ static const struct genl_ops ieee8021154_ops[] = {
 	IEEE802154_DUMP(IEEE802154_LIST_IFACE, ieee802154_list_iface,
 			ieee802154_dump_iface),
 	IEEE802154_OP(IEEE802154_SET_MACPARAMS, ieee802154_set_macparams),
+	IEEE802154_OP(IEEE802154_LLSEC_GETPARAMS, ieee802154_llsec_getparams),
+	IEEE802154_OP(IEEE802154_LLSEC_SETPARAMS, ieee802154_llsec_setparams),
 };
 
 static const struct genl_multicast_group ieee802154_mcgrps[] = {
