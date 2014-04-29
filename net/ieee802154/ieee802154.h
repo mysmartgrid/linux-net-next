@@ -70,5 +70,9 @@ int ieee802154_set_macparams(struct sk_buff *skb, struct genl_info *info);
 
 int ieee802154_llsec_getparams(struct sk_buff *skb, struct genl_info *info);
 int ieee802154_llsec_setparams(struct sk_buff *skb, struct genl_info *info);
+int ieee802154_llsec_add_key(struct sk_buff *skb, struct genl_info *info);
+int ieee802154_llsec_del_key(struct sk_buff *skb, struct genl_info *info);
+int ieee802154_llsec_dump_keys(struct sk_buff *skb,
+			       struct netlink_callback *cb);
 
 #endif

@@ -929,3 +929,218 @@ out:
 	dev_put(dev);
 	return rc;
 }
+
+
+
+struct llsec_dump_data {
+	struct sk_buff *skb;
+	int s_idx, s_idx2;
+	int portid;
+	int nlmsg_seq;
+	struct net_device *dev;
+	struct ieee802154_mlme_ops *ops;
+};
+
+static int
+ieee802154_llsec_dump_table(struct sk_buff *skb, struct netlink_callback *cb,
+			    int (*step)(struct llsec_dump_data*))
+{
+	struct net *net = sock_net(skb->sk);
+	struct net_device *dev;
+	struct llsec_dump_data data;
+	int idx = 0;
+	int first_dev = cb->args[0];
+	int rc;
+
+	for_each_netdev(net, dev) {
+		if (idx < first_dev || dev->type != ARPHRD_IEEE802154)
+			goto skip;
+
+		data.ops = ieee802154_mlme_ops(dev);
+		if (!data.ops->llsec)
+			goto skip;
+
+		data.skb = skb;
+		data.s_idx = cb->args[1];
+		data.s_idx2 = cb->args[2];
+		data.dev = dev;
+		data.portid = NETLINK_CB(cb->skb).portid;
+		data.nlmsg_seq = cb->nlh->nlmsg_seq;
+
+		rc = step(&data);
+		if (rc < 0)
+			break;
+
+skip:
+		idx++;
+	}
+	cb->args[0] = idx;
+
+	return skb->len;
+}
+
+static int
+ieee802154_nl_llsec_change(struct sk_buff *skb, struct genl_info *info,
+			   int (*fn)(struct net_device*, struct genl_info*))
+{
+	struct net_device *dev = NULL;
+	int rc = -EINVAL;
+
+	dev = ieee802154_nl_get_dev(info);
+	if (!dev)
+		return -ENODEV;
+
+	if (!ieee802154_mlme_ops(dev)->llsec)
+		rc = -EOPNOTSUPP;
+	else
+		rc = fn(dev, info);
+
+	dev_put(dev);
+	return rc;
+}
+
+
+
+static int
+ieee802154_llsec_parse_key(struct genl_info *info,
+			   struct ieee802154_llsec_key *key)
+{
+	u8 frames;
+	u32 commands[256 / 32];
+
+	memset(key, 0, sizeof(*key));
+
+	if (!info->attrs[IEEE802154_ATTR_LLSEC_KEY_USAGE_FRAME_TYPES] ||
+	    !info->attrs[IEEE802154_ATTR_LLSEC_KEY_BYTES])
+		return -EINVAL;
+
+	frames = nla_get_u8(info->attrs[IEEE802154_ATTR_LLSEC_KEY_USAGE_FRAME_TYPES]);
+	if ((frames & BIT(IEEE802154_FC_TYPE_MAC_CMD)) &&
+	    !info->attrs[IEEE802154_ATTR_LLSEC_KEY_USAGE_COMMANDS])
+		return -EINVAL;
+
+	if (info->attrs[IEEE802154_ATTR_LLSEC_KEY_USAGE_COMMANDS]) {
+		nla_memcpy(commands,
+			   info->attrs[IEEE802154_ATTR_LLSEC_KEY_USAGE_COMMANDS],
+			   256 / 8);
+
+		if (commands[0] || commands[1] || commands[2] || commands[3] ||
+		    commands[4] || commands[5] || commands[6] ||
+		    commands[7] >= BIT(IEEE802154_CMD_GTS_REQ + 1))
+			return -EINVAL;
+
+		key->cmd_frame_ids = commands[7];
+	}
+
+	key->frame_types = frames;
+
+	nla_memcpy(key->key, info->attrs[IEEE802154_ATTR_LLSEC_KEY_BYTES],
+		   IEEE802154_LLSEC_KEY_SIZE);
+
+	return 0;
+}
+
+static int llsec_add_key(struct net_device *dev, struct genl_info *info)
+{
+	struct ieee802154_mlme_ops *ops = ieee802154_mlme_ops(dev);
+	struct ieee802154_llsec_key key;
+	struct ieee802154_llsec_key_id id;
+
+	if (ieee802154_llsec_parse_key(info, &key) ||
+	    ieee802154_llsec_parse_key_id(info, &id))
+		return -EINVAL;
+
+	return ops->llsec->add_key(dev, &id, &key);
+}
+
+int ieee802154_llsec_add_key(struct sk_buff *skb, struct genl_info *info)
+{
+	return ieee802154_nl_llsec_change(skb, info, llsec_add_key);
+}
+
+static int llsec_remove_key(struct net_device *dev, struct genl_info *info)
+{
+	struct ieee802154_mlme_ops *ops = ieee802154_mlme_ops(dev);
+	struct ieee802154_llsec_key_id id;
+
+	if (ieee802154_llsec_parse_key_id(info, &id))
+		return -EINVAL;
+
+	return ops->llsec->del_key(dev, &id);
+}
+
+int ieee802154_llsec_del_key(struct sk_buff *skb, struct genl_info *info)
+{
+	return ieee802154_nl_llsec_change(skb, info, llsec_remove_key);
+}
+
+static int
+ieee802154_nl_fill_key(struct sk_buff *msg, u32 portid, u32 seq,
+		       const struct ieee802154_llsec_key_entry *key,
+		       const struct net_device *dev)
+{
+	void *hdr;
+	u32 commands[256 / 32];
+
+	hdr = genlmsg_put(msg, 0, seq, &nl802154_family, NLM_F_MULTI,
+			  IEEE802154_LLSEC_LIST_KEY);
+	if (!hdr)
+		goto out;
+
+	if (nla_put_string(msg, IEEE802154_ATTR_DEV_NAME, dev->name) ||
+	    nla_put_u32(msg, IEEE802154_ATTR_DEV_INDEX, dev->ifindex) ||
+	    ieee802154_llsec_fill_key_id(msg, &key->id) ||
+	    nla_put_u8(msg, IEEE802154_ATTR_LLSEC_KEY_USAGE_FRAME_TYPES,
+		       key->key->frame_types))
+		goto nla_put_failure;
+
+	if (key->key->frame_types & BIT(IEEE802154_FC_TYPE_MAC_CMD)) {
+		memset(commands, 0, sizeof(commands));
+		commands[7] = key->key->cmd_frame_ids;
+		if (nla_put(msg, IEEE802154_ATTR_LLSEC_KEY_USAGE_COMMANDS,
+			    sizeof(commands), commands))
+			goto nla_put_failure;
+	}
+
+	if (nla_put(msg, IEEE802154_ATTR_LLSEC_KEY_BYTES,
+		    IEEE802154_LLSEC_KEY_SIZE, key->key->key))
+		goto nla_put_failure;
+
+	return genlmsg_end(msg, hdr);
+
+nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+out:
+	return -EMSGSIZE;
+}
+
+static int llsec_iter_keys(struct llsec_dump_data *data)
+{
+	struct ieee802154_llsec_key_entry *pos;
+	struct ieee802154_llsec_table *t;
+	int rc = 0, idx = 0;
+
+	data->ops->llsec->table_lock(data->dev);
+	data->ops->llsec->get_table(data->dev, &t);
+
+	list_for_each_entry(pos, &t->keys, list) {
+		if (idx++ < data->s_idx)
+			continue;
+
+		if (ieee802154_nl_fill_key(data->skb, data->portid,
+					   data->nlmsg_seq, pos, data->dev)) {
+			rc = -EMSGSIZE;
+			break;
+		}
+
+		data->s_idx++;
+	}
+
+	data->ops->llsec->table_unlock(data->dev);
+	return rc;
+}
+
+int ieee802154_llsec_dump_keys(struct sk_buff *skb, struct netlink_callback *cb)
+{
+	return ieee802154_llsec_dump_table(skb, cb, llsec_iter_keys);
+}

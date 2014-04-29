@@ -126,6 +126,10 @@ static const struct genl_ops ieee8021154_ops[] = {
 	IEEE802154_OP(IEEE802154_SET_MACPARAMS, ieee802154_set_macparams),
 	IEEE802154_OP(IEEE802154_LLSEC_GETPARAMS, ieee802154_llsec_getparams),
 	IEEE802154_OP(IEEE802154_LLSEC_SETPARAMS, ieee802154_llsec_setparams),
+	IEEE802154_DUMP(IEEE802154_LLSEC_LIST_KEY, NULL,
+			ieee802154_llsec_dump_keys),
+	IEEE802154_OP(IEEE802154_LLSEC_ADD_KEY, ieee802154_llsec_add_key),
+	IEEE802154_OP(IEEE802154_LLSEC_DEL_KEY, ieee802154_llsec_del_key),
 };
 
 static const struct genl_multicast_group ieee802154_mcgrps[] = {
