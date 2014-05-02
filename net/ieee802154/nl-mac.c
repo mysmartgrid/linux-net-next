@@ -1383,3 +1383,128 @@ int ieee802154_llsec_dump_devkeys(struct sk_buff *skb,
 {
 	return ieee802154_llsec_dump_table(skb, cb, llsec_iter_devkeys);
 }
+
+
+
+static int
+llsec_parse_seclevel(struct genl_info *info,
+		     struct ieee802154_llsec_seclevel *sl)
+{
+	memset(sl, 0, sizeof(*sl));
+
+	if (!info->attrs[IEEE802154_ATTR_LLSEC_FRAME_TYPE] ||
+	    !info->attrs[IEEE802154_ATTR_LLSEC_SECLEVELS] ||
+	    !info->attrs[IEEE802154_ATTR_LLSEC_DEV_OVERRIDE])
+		return -EINVAL;
+
+	sl->frame_type = nla_get_u8(info->attrs[IEEE802154_ATTR_LLSEC_FRAME_TYPE]);
+	if (sl->frame_type == IEEE802154_FC_TYPE_MAC_CMD) {
+		if (!info->attrs[IEEE802154_ATTR_LLSEC_CMD_FRAME_ID])
+			return -EINVAL;
+
+		sl->cmd_frame_id = nla_get_u8(info->attrs[IEEE802154_ATTR_LLSEC_CMD_FRAME_ID]);
+	}
+
+	sl->sec_levels = nla_get_u8(info->attrs[IEEE802154_ATTR_LLSEC_SECLEVELS]);
+	sl->device_override = nla_get_u8(info->attrs[IEEE802154_ATTR_LLSEC_DEV_OVERRIDE]);
+
+	return 0;
+}
+
+static int llsec_add_seclevel(struct net_device *dev, struct genl_info *info)
+{
+	struct ieee802154_mlme_ops *ops = ieee802154_mlme_ops(dev);
+	struct ieee802154_llsec_seclevel sl;
+
+	if (llsec_parse_seclevel(info, &sl))
+		return -EINVAL;
+
+	return ops->llsec->add_seclevel(dev, &sl);
+}
+
+int ieee802154_llsec_add_seclevel(struct sk_buff *skb, struct genl_info *info)
+{
+	return ieee802154_nl_llsec_change(skb, info, llsec_add_seclevel);
+}
+
+static int llsec_del_seclevel(struct net_device *dev, struct genl_info *info)
+{
+	struct ieee802154_mlme_ops *ops = ieee802154_mlme_ops(dev);
+	struct ieee802154_llsec_seclevel sl;
+
+	if (llsec_parse_seclevel(info, &sl))
+		return -EINVAL;
+
+	return ops->llsec->del_seclevel(dev, &sl);
+}
+
+int ieee802154_llsec_del_seclevel(struct sk_buff *skb, struct genl_info *info)
+{
+	return ieee802154_nl_llsec_change(skb, info, llsec_del_seclevel);
+}
+
+static int
+ieee802154_nl_fill_seclevel(struct sk_buff *msg, u32 portid, u32 seq,
+			    const struct ieee802154_llsec_seclevel *sl,
+			    const struct net_device *dev)
+{
+	void *hdr;
+
+	hdr = genlmsg_put(msg, 0, seq, &nl802154_family, NLM_F_MULTI,
+			  IEEE802154_LLSEC_LIST_SECLEVEL);
+	if (!hdr)
+		goto out;
+
+	if (nla_put_string(msg, IEEE802154_ATTR_DEV_NAME, dev->name) ||
+	    nla_put_u32(msg, IEEE802154_ATTR_DEV_INDEX, dev->ifindex) ||
+	    nla_put_u8(msg, IEEE802154_ATTR_LLSEC_FRAME_TYPE, sl->frame_type) ||
+	    nla_put_u8(msg, IEEE802154_ATTR_LLSEC_SECLEVELS, sl->sec_levels) ||
+	    nla_put_u8(msg, IEEE802154_ATTR_LLSEC_DEV_OVERRIDE,
+		       sl->device_override))
+		goto nla_put_failure;
+
+	if (sl->frame_type == IEEE802154_FC_TYPE_MAC_CMD &&
+	    nla_put_u8(msg, IEEE802154_ATTR_LLSEC_CMD_FRAME_ID,
+		       sl->cmd_frame_id))
+		goto nla_put_failure;
+
+	return genlmsg_end(msg, hdr);
+
+nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+out:
+	return -EMSGSIZE;
+}
+
+static int llsec_iter_seclevels(struct llsec_dump_data *data)
+{
+	struct ieee802154_llsec_seclevel *pos;
+	struct ieee802154_llsec_table *t;
+	int rc = 0, idx = 0;
+
+	data->ops->llsec->table_lock(data->dev);
+	data->ops->llsec->get_table(data->dev, &t);
+
+	list_for_each_entry(pos, &t->security_levels, list) {
+		if (idx++ < data->s_idx)
+			continue;
+
+		if (ieee802154_nl_fill_seclevel(data->skb, data->portid,
+						data->nlmsg_seq, pos,
+						data->dev)) {
+			rc = -EMSGSIZE;
+			break;
+		}
+
+		data->s_idx++;
+	}
+
+	data->ops->llsec->table_unlock(data->dev);
+	return rc;
+}
+
+int ieee802154_llsec_dump_seclevels(struct sk_buff *skb,
+				    struct netlink_callback *cb)
+{
+	return ieee802154_llsec_dump_table(skb, cb, llsec_iter_seclevels);
+}
