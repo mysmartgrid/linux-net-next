@@ -1265,3 +1265,121 @@ int ieee802154_llsec_dump_devs(struct sk_buff *skb, struct netlink_callback *cb)
 {
 	return ieee802154_llsec_dump_table(skb, cb, llsec_iter_devs);
 }
+
+
+
+static int llsec_add_devkey(struct net_device *dev, struct genl_info *info)
+{
+	struct ieee802154_mlme_ops *ops = ieee802154_mlme_ops(dev);
+	struct ieee802154_llsec_device_key key;
+	__le64 devaddr;
+
+	if (!info->attrs[IEEE802154_ATTR_LLSEC_FRAME_COUNTER] ||
+	    !info->attrs[IEEE802154_ATTR_HW_ADDR] ||
+	    ieee802154_llsec_parse_key_id(info, &key.key_id))
+		return -EINVAL;
+
+	devaddr = nla_get_hwaddr(info->attrs[IEEE802154_ATTR_HW_ADDR]);
+	key.frame_counter = nla_get_u32(info->attrs[IEEE802154_ATTR_LLSEC_FRAME_COUNTER]);
+
+	return ops->llsec->add_devkey(dev, devaddr, &key);
+}
+
+int ieee802154_llsec_add_devkey(struct sk_buff *skb, struct genl_info *info)
+{
+	return ieee802154_nl_llsec_change(skb, info, llsec_add_devkey);
+}
+
+static int llsec_del_devkey(struct net_device *dev, struct genl_info *info)
+{
+	struct ieee802154_mlme_ops *ops = ieee802154_mlme_ops(dev);
+	struct ieee802154_llsec_device_key key;
+	__le64 devaddr;
+
+	if (!info->attrs[IEEE802154_ATTR_HW_ADDR] ||
+	    ieee802154_llsec_parse_key_id(info, &key.key_id))
+		return -EINVAL;
+
+	devaddr = nla_get_hwaddr(info->attrs[IEEE802154_ATTR_HW_ADDR]);
+
+	return ops->llsec->del_devkey(dev, devaddr, &key);
+}
+
+int ieee802154_llsec_del_devkey(struct sk_buff *skb, struct genl_info *info)
+{
+	return ieee802154_nl_llsec_change(skb, info, llsec_del_devkey);
+}
+
+static int
+ieee802154_nl_fill_devkey(struct sk_buff *msg, u32 portid, u32 seq,
+			  __le64 devaddr,
+			  const struct ieee802154_llsec_device_key *devkey,
+			  const struct net_device *dev)
+{
+	void *hdr;
+
+	hdr = genlmsg_put(msg, 0, seq, &nl802154_family, NLM_F_MULTI,
+			  IEEE802154_LLSEC_LIST_DEVKEY);
+	if (!hdr)
+		goto out;
+
+	if (nla_put_string(msg, IEEE802154_ATTR_DEV_NAME, dev->name) ||
+	    nla_put_u32(msg, IEEE802154_ATTR_DEV_INDEX, dev->ifindex) ||
+	    nla_put_hwaddr(msg, IEEE802154_ATTR_HW_ADDR, devaddr) ||
+	    nla_put_u32(msg, IEEE802154_ATTR_LLSEC_FRAME_COUNTER,
+			devkey->frame_counter) ||
+	    ieee802154_llsec_fill_key_id(msg, &devkey->key_id))
+		goto nla_put_failure;
+
+	return genlmsg_end(msg, hdr);
+
+nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+out:
+	return -EMSGSIZE;
+}
+
+static int llsec_iter_devkeys(struct llsec_dump_data *data)
+{
+	struct ieee802154_llsec_device *dpos;
+	struct ieee802154_llsec_device_key *kpos;
+	struct ieee802154_llsec_table *t;
+	int rc = 0, idx = 0, idx2;
+
+	data->ops->llsec->table_lock(data->dev);
+	data->ops->llsec->get_table(data->dev, &t);
+
+	list_for_each_entry(dpos, &t->devices, list) {
+		if (idx++ < data->s_idx)
+			continue;
+
+		idx2 = 0;
+
+		list_for_each_entry(kpos, &dpos->keys, list) {
+			if (idx2++ < data->s_idx2)
+				continue;
+
+			if (ieee802154_nl_fill_devkey(data->skb, data->portid,
+						      data->nlmsg_seq,
+						      dpos->hwaddr, kpos,
+						      data->dev)) {
+				rc = -EMSGSIZE;
+				goto out;
+			}
+
+			data->s_idx2++;
+		}
+
+		data->s_idx++;
+	}
+
+out:
+	data->ops->llsec->table_unlock(data->dev);
+	return rc;
+}
+
+int ieee802154_llsec_dump_devkeys(struct sk_buff *skb,
+				  struct netlink_callback *cb)
+{
+	return ieee802154_llsec_dump_table(skb, cb, llsec_iter_devkeys);
+}

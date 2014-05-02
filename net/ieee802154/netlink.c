@@ -134,6 +134,10 @@ static const struct genl_ops ieee8021154_ops[] = {
 			ieee802154_llsec_dump_devs),
 	IEEE802154_OP(IEEE802154_LLSEC_ADD_DEV, ieee802154_llsec_add_dev),
 	IEEE802154_OP(IEEE802154_LLSEC_DEL_DEV, ieee802154_llsec_del_dev),
+	IEEE802154_DUMP(IEEE802154_LLSEC_LIST_DEVKEY, NULL,
+			ieee802154_llsec_dump_devkeys),
+	IEEE802154_OP(IEEE802154_LLSEC_ADD_DEVKEY, ieee802154_llsec_add_devkey),
+	IEEE802154_OP(IEEE802154_LLSEC_DEL_DEVKEY, ieee802154_llsec_del_devkey),
 };
 
 static const struct genl_multicast_group ieee802154_mcgrps[] = {
