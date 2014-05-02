@@ -1144,3 +1144,124 @@ int ieee802154_llsec_dump_keys(struct sk_buff *skb, struct netlink_callback *cb)
 {
 	return ieee802154_llsec_dump_table(skb, cb, llsec_iter_keys);
 }
+
+
+
+static int
+llsec_parse_dev(struct genl_info *info,
+		struct ieee802154_llsec_device *dev)
+{
+	memset(dev, 0, sizeof(*dev));
+
+	if (!info->attrs[IEEE802154_ATTR_LLSEC_FRAME_COUNTER] ||
+	    !info->attrs[IEEE802154_ATTR_HW_ADDR] ||
+	    (!!info->attrs[IEEE802154_ATTR_PAN_ID] !=
+	     !!info->attrs[IEEE802154_ATTR_SHORT_ADDR]))
+		return -EINVAL;
+
+	if (info->attrs[IEEE802154_ATTR_PAN_ID]) {
+		dev->pan_id = nla_get_shortaddr(info->attrs[IEEE802154_ATTR_PAN_ID]);
+		dev->short_addr = nla_get_shortaddr(info->attrs[IEEE802154_ATTR_SHORT_ADDR]);
+	} else {
+		dev->short_addr = IEEE802154_ADDR_UNDEF;
+	}
+
+	dev->hwaddr = nla_get_hwaddr(info->attrs[IEEE802154_ATTR_HW_ADDR]);
+	dev->frame_counter = nla_get_u32(info->attrs[IEEE802154_ATTR_LLSEC_FRAME_COUNTER]);
+
+	return 0;
+}
+
+static int llsec_add_dev(struct net_device *dev, struct genl_info *info)
+{
+	struct ieee802154_mlme_ops *ops = ieee802154_mlme_ops(dev);
+	struct ieee802154_llsec_device desc;
+
+	if (llsec_parse_dev(info, &desc))
+		return -EINVAL;
+
+	return ops->llsec->add_dev(dev, &desc);
+}
+
+int ieee802154_llsec_add_dev(struct sk_buff *skb, struct genl_info *info)
+{
+	return ieee802154_nl_llsec_change(skb, info, llsec_add_dev);
+}
+
+static int llsec_del_dev(struct net_device *dev, struct genl_info *info)
+{
+	struct ieee802154_mlme_ops *ops = ieee802154_mlme_ops(dev);
+	__le64 devaddr;
+
+	if (!info->attrs[IEEE802154_ATTR_HW_ADDR])
+		return -EINVAL;
+
+	devaddr = nla_get_hwaddr(info->attrs[IEEE802154_ATTR_HW_ADDR]);
+
+	return ops->llsec->del_dev(dev, devaddr);
+}
+
+int ieee802154_llsec_del_dev(struct sk_buff *skb, struct genl_info *info)
+{
+	return ieee802154_nl_llsec_change(skb, info, llsec_del_dev);
+}
+
+static int
+ieee802154_nl_fill_dev(struct sk_buff *msg, u32 portid, u32 seq,
+		       const struct ieee802154_llsec_device *desc,
+		       const struct net_device *dev)
+{
+	void *hdr;
+
+	hdr = genlmsg_put(msg, 0, seq, &nl802154_family, NLM_F_MULTI,
+			  IEEE802154_LLSEC_LIST_DEV);
+	if (!hdr)
+		goto out;
+
+	if (nla_put_string(msg, IEEE802154_ATTR_DEV_NAME, dev->name) ||
+	    nla_put_u32(msg, IEEE802154_ATTR_DEV_INDEX, dev->ifindex) ||
+	    nla_put_u16(msg, IEEE802154_ATTR_PAN_ID, desc->pan_id) ||
+	    nla_put_u16(msg, IEEE802154_ATTR_SHORT_ADDR, desc->short_addr) ||
+	    nla_put_hwaddr(msg, IEEE802154_ATTR_HW_ADDR, desc->hwaddr) ||
+	    nla_put_u32(msg, IEEE802154_ATTR_LLSEC_FRAME_COUNTER,
+			desc->frame_counter))
+		goto nla_put_failure;
+
+	return genlmsg_end(msg, hdr);
+
+nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+out:
+	return -EMSGSIZE;
+}
+
+static int llsec_iter_devs(struct llsec_dump_data *data)
+{
+	struct ieee802154_llsec_device *pos;
+	struct ieee802154_llsec_table *t;
+	int rc = 0, idx = 0;
+
+	data->ops->llsec->table_lock(data->dev);
+	data->ops->llsec->get_table(data->dev, &t);
+
+	list_for_each_entry(pos, &t->devices, list) {
+		if (idx++ < data->s_idx)
+			continue;
+
+		if (ieee802154_nl_fill_dev(data->skb, data->portid,
+					   data->nlmsg_seq, pos, data->dev)) {
+			rc = -EMSGSIZE;
+			break;
+		}
+
+		data->s_idx++;
+	}
+
+	data->ops->llsec->table_unlock(data->dev);
+	return rc;
+}
+
+int ieee802154_llsec_dump_devs(struct sk_buff *skb, struct netlink_callback *cb)
+{
+	return ieee802154_llsec_dump_table(skb, cb, llsec_iter_devs);
+}

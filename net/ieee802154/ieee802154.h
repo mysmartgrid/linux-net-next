@@ -74,5 +74,9 @@ int ieee802154_llsec_add_key(struct sk_buff *skb, struct genl_info *info);
 int ieee802154_llsec_del_key(struct sk_buff *skb, struct genl_info *info);
 int ieee802154_llsec_dump_keys(struct sk_buff *skb,
 			       struct netlink_callback *cb);
+int ieee802154_llsec_add_dev(struct sk_buff *skb, struct genl_info *info);
+int ieee802154_llsec_del_dev(struct sk_buff *skb, struct genl_info *info);
+int ieee802154_llsec_dump_devs(struct sk_buff *skb,
+			       struct netlink_callback *cb);
 
 #endif
